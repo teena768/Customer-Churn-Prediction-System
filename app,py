@@ -1,0 +1,452 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, confusion_matrix
+import io
+
+# Setup page configuration
+st.set_page_config(page_title="Customer Churn Prediction", page_icon="📊", layout="wide")
+
+# Custom CSS for better UI
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.5rem;
+        color: #1E88E5;
+        font-weight: 700;
+        margin-bottom: 0px;
+    }
+    .sub-header {
+        font-size: 1.5rem;
+        color: #424242;
+        font-weight: 600;
+        margin-top: 20px;
+        margin-bottom: 10px;
+    }
+    .prediction-card-likely {
+        background-color: #FFCDD2;
+        padding: 20px;
+        border-radius: 10px;
+        color: #B71C1C;
+        text-align: center;
+        font-size: 1.5rem;
+        font-weight: bold;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    .prediction-card-not-likely {
+        background-color: #C8E6C9;
+        padding: 20px;
+        border-radius: 10px;
+        color: #1B5E20;
+        text-align: center;
+        font-size: 1.5rem;
+        font-weight: bold;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Helper functions
+@st.cache_data
+def load_data(file):
+    df = pd.read_csv(file)
+    return df
+
+def preprocess_data(df):
+    df_processed = df.copy()
+    
+    # Drop CustomerID as it's not a predictive feature
+    if 'CustomerID' in df_processed.columns:
+        df_processed.drop('CustomerID', axis=1, inplace=True)
+        
+    # Handle specific types like TotalCharges which often have space instead of NaN
+    if 'TotalCharges' in df_processed.columns:
+        if df_processed['TotalCharges'].dtype == 'object':
+            df_processed['TotalCharges'] = pd.to_numeric(df_processed['TotalCharges'].replace(r'^\s*$', np.nan, regex=True))
+        df_processed['TotalCharges'] = df_processed['TotalCharges'].fillna(df_processed['TotalCharges'].median())
+        
+    # Fill any other numeric missing
+    numeric_cols = df_processed.select_dtypes(include=['number']).columns
+    for col in numeric_cols:
+        df_processed[col] = df_processed[col].fillna(df_processed[col].median())
+        
+    # Fill categorical missing
+    cat_cols = df_processed.select_dtypes(include=['object']).columns
+    for col in cat_cols:
+        df_processed[col] = df_processed[col].fillna(df_processed[col].mode()[0])
+        
+    # Categorical encoding
+    le = LabelEncoder()
+    label_encoders = {}
+    for col in cat_cols:
+        df_processed[col] = le.fit_transform(df_processed[col].astype(str))
+        label_encoders[col] = le
+        
+    return df_processed, label_encoders
+
+def train_models(df_processed):
+    if 'Churn' not in df_processed.columns:
+        raise ValueError("Dataset does not contain a 'Churn' column.")
+        
+    X = df_processed.drop('Churn', axis=1)
+    y = df_processed['Churn']
+    
+    # Ensure all data is numeric
+    X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
+    
+    # Scale features
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.2, random_state=42)
+    
+    models = {
+        'Logistic Regression': LogisticRegression(random_state=42),
+        'Decision Tree': DecisionTreeClassifier(random_state=42, max_depth=5),
+        'Random Forest': RandomForestClassifier(random_state=42, n_estimators=100)
+    }
+    
+    results = {}
+    trained_models = {}
+    
+    for name, model in models.items():
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+        acc = accuracy_score(y_test, y_pred)
+        cm = confusion_matrix(y_test, y_pred)
+        
+        # Feature importance
+        if name in ['Decision Tree', 'Random Forest']:
+            importance = model.feature_importances_
+        else:
+            importance = np.abs(model.coef_[0])
+            
+        feat_imp = pd.DataFrame({
+            'Feature': X.columns,
+            'Importance': importance
+        }).sort_values(by='Importance', ascending=False)
+        
+        results[name] = {
+            'Accuracy': acc,
+            'Confusion Matrix': cm,
+            'Feature Importance': feat_imp
+        }
+        trained_models[name] = model
+        
+    return trained_models, results, scaler, X.columns
+
+# Sidebar navigation
+st.sidebar.image("https://cdn-icons-png.flaticon.com/512/3003/3003310.png", width=100)
+st.sidebar.title("Navigation")
+page = st.sidebar.radio("Go to:", ["Upload Data", "EDA", "Model", "Predict"])
+
+# State management
+if 'data' not in st.session_state:
+    st.session_state.data = None
+if 'processed_data' not in st.session_state:
+    st.session_state.processed_data = None
+if 'label_encoders' not in st.session_state:
+    st.session_state.label_encoders = None
+if 'models' not in st.session_state:
+    st.session_state.models = None
+if 'results' not in st.session_state:
+    st.session_state.results = None
+if 'scaler' not in st.session_state:
+    st.session_state.scaler = None
+if 'feature_cols' not in st.session_state:
+    st.session_state.feature_cols = None
+
+# Page 1: Upload Data
+if page == "Upload Data":
+    st.markdown('<p class="main-header">Upload Dataset</p>', unsafe_allow_html=True)
+    st.write("Upload a telecom customer churn CSV dataset to begin analysis.")
+    
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        st.info("Don't have a dataset? Use the generated sample by running `python generate_sample_data.py`.")
+    
+    uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
+    
+    if uploaded_file is not None:
+        try:
+            df = load_data(uploaded_file)
+            st.session_state.data = df
+            st.success("🎉 File uploaded successfully!")
+            
+            st.markdown('<p class="sub-header">Dataset Preview (First 5 Rows)</p>', unsafe_allow_html=True)
+            st.dataframe(df.head())
+            st.write(f"**Dataset Shape:** `{df.shape[0]}` rows and `{df.shape[1]}` columns")
+            
+            st.markdown("---")
+            st.markdown('<p class="sub-header">Data Preprocessing</p>', unsafe_allow_html=True)
+            st.write("Before we can build models or do in-depth analysis, the data must be cleaned (missing values handled) and encoded.")
+            
+            if st.button("⚙️ Process Data", type="primary"):
+                with st.spinner("Processing data..."):
+                    processed, encoders = preprocess_data(df)
+                    st.session_state.processed_data = processed
+                    st.session_state.label_encoders = encoders
+                    st.success("Data successfully processed! You can now proceed to EDA or Model Building.")
+        except Exception as e:
+            st.error(f"Error reading the file: {e}")
+            
+    else:
+        st.warning("Awaiting CSV file upload...")
+
+# Page 2: EDA
+elif page == "EDA":
+    st.markdown('<p class="main-header">Exploratory Data Analysis</p>', unsafe_allow_html=True)
+    
+    if st.session_state.data is not None:
+        df = st.session_state.data
+        
+        # Check if Churn column exists
+        if 'Churn' not in df.columns:
+            st.error("Error: The uploaded CSV does not have a 'Churn' column.")
+        else:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown('<p class="sub-header">Churn Count</p>', unsafe_allow_html=True)
+                fig, ax = plt.subplots(figsize=(6, 4))
+                sns.countplot(x='Churn', data=df, palette='Set2', ax=ax)
+                ax.set_title("Distribution of Churn")
+                st.pyplot(fig)
+                
+                st.markdown('<p class="sub-header">Churn Proportion</p>', unsafe_allow_html=True)
+                fig, ax = plt.subplots(figsize=(6, 4))
+                churn_counts = df['Churn'].value_counts()
+                ax.pie(churn_counts, labels=churn_counts.index, autopct='%1.1f%%', colors=['#66b3ff', '#ff9999'], startangle=90, explode=(0.05, 0))
+                st.pyplot(fig)
+                
+            with col2:
+                if 'Tenure' in df.columns:
+                    st.markdown('<p class="sub-header">Tenure Distribution</p>', unsafe_allow_html=True)
+                    fig, ax = plt.subplots(figsize=(6, 4))
+                    sns.histplot(df['Tenure'], bins=30, kde=True, color='#8E24AA', ax=ax)
+                    ax.set_title("Customer Tenure (Months)")
+                    st.pyplot(fig)
+                
+                if 'MonthlyCharges' in df.columns:
+                    st.markdown('<p class="sub-header">Monthly Charges</p>', unsafe_allow_html=True)
+                    fig, ax = plt.subplots(figsize=(6, 4))
+                    sns.histplot(df['MonthlyCharges'], bins=30, kde=True, color='#00897B', ax=ax)
+                    ax.set_title("Distribution of Monthly Charges")
+                    st.pyplot(fig)
+                
+            st.markdown("---")
+            st.markdown('<p class="sub-header">Correlation Heatmap</p>', unsafe_allow_html=True)
+            if st.session_state.processed_data is not None:
+                fig, ax = plt.subplots(figsize=(10, 8))
+                corr = st.session_state.processed_data.corr()
+                mask = np.triu(np.ones_like(corr, dtype=bool))
+                sns.heatmap(corr, mask=mask, annot=True, cmap='coolwarm', fmt=".2f", ax=ax, linewidths=0.5)
+                st.pyplot(fig)
+            else:
+                st.info("💡 Please go to 'Upload Data' and process the data to view the correlation heatmap.")
+            
+    else:
+        st.warning("Please upload a dataset first in the 'Upload Data' section.")
+
+# Page 3: Model
+elif page == "Model":
+    st.markdown('<p class="main-header">Model Training & Evaluation</p>', unsafe_allow_html=True)
+    
+    if st.session_state.processed_data is not None:
+        if st.session_state.models is None:
+            if st.button("🚀 Train Models", type="primary"):
+                with st.spinner("Training models (Logistic Regression, Decision Tree, Random Forest)..."):
+                    try:
+                        models, results, scaler, feature_cols = train_models(st.session_state.processed_data)
+                        st.session_state.models = models
+                        st.session_state.results = results
+                        st.session_state.scaler = scaler
+                        st.session_state.feature_cols = feature_cols
+                        st.success("✅ Models trained successfully!")
+                        st.rerun() # Refresh to show results
+                    except Exception as e:
+                        st.error(f"Error training models: {e}")
+            else:
+                st.info("Click the button above to train Machine Learning models on your processed dataset.")
+        
+        if st.session_state.models is not None:
+            st.markdown("### Model Comparison")
+            
+            # Create a comparison table
+            comp_data = []
+            for m in st.session_state.models.keys():
+                comp_data.append({"Model": m, "Accuracy": st.session_state.results[m]["Accuracy"]})
+            comp_df = pd.DataFrame(comp_data).sort_values(by="Accuracy", ascending=False)
+            
+            st.dataframe(comp_df, use_container_width=True)
+            
+            st.markdown("---")
+            selected_model = st.selectbox("Detailed Analysis for:", list(st.session_state.models.keys()))
+            
+            res = st.session_state.results[selected_model]
+            st.metric("Test Accuracy", f"{res['Accuracy']:.2%}")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown('<p class="sub-header">Confusion Matrix</p>', unsafe_allow_html=True)
+                fig, ax = plt.subplots(figsize=(5, 4))
+                sns.heatmap(res['Confusion Matrix'], annot=True, fmt='d', cmap='OrRd', ax=ax, 
+                            xticklabels=['No', 'Yes'], yticklabels=['No', 'Yes'])
+                plt.ylabel('Actual Churn')
+                plt.xlabel('Predicted Churn')
+                st.pyplot(fig)
+                
+            with col2:
+                st.markdown('<p class="sub-header">Feature Importance</p>', unsafe_allow_html=True)
+                fig, ax = plt.subplots(figsize=(6, 5))
+                sns.barplot(x='Importance', y='Feature', data=res['Feature Importance'].head(10), palette='viridis', ax=ax)
+                st.pyplot(fig)
+            
+    else:
+        st.warning("Please upload and process a dataset first.")
+
+# Page 4: Predict
+elif page == "Predict":
+    st.markdown('<p class="main-header">Predict New Customer</p>', unsafe_allow_html=True)
+    
+    if st.session_state.models is not None:
+        st.write("Use the trained modes to predict if a new customer is likely to churn.")
+        
+        with st.container():
+            st.markdown("### Customer Details")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Default input fields as requested
+                tenure = st.number_input("Tenure (Months)", min_value=0, max_value=120, value=1)
+                monthly_charges = st.number_input("Monthly Charges ($)", min_value=0.0, max_value=300.0, value=50.0)
+                
+                # Check what other categorical fields are available in encoders
+                le_dict = st.session_state.label_encoders
+                gender = st.selectbox("Gender", ['Male', 'Female']) if 'Gender' in le_dict else 'Male'
+                
+            with col2:
+                contract = st.selectbox("Contract Type", ['Month-to-month', 'One year', 'Two year']) if 'Contract' in le_dict else 'Month-to-month'
+                internet_service = st.selectbox("Internet Service", ['DSL', 'Fiber optic', 'No']) if 'InternetService' in le_dict else 'DSL'
+                
+                total_charges = tenure * monthly_charges
+                st.info(f"Calculated Total Charges: **${total_charges:.2f}**")
+                
+        st.markdown("---")
+        
+        col_btn, col_algo = st.columns([1, 2])
+        with col_algo:
+            selected_predict_model = st.selectbox("Algorithm:", list(st.session_state.models.keys()))
+            
+        with col_btn:
+            st.write("") # Spacing
+            st.write("")
+            predict_btn = st.button("Predict Probability", type="primary", use_container_width=True)
+            
+        if predict_btn:
+            input_data = {}
+            for col in st.session_state.feature_cols:
+                input_data[col] = 0 # default fallback
+                
+            if 'Gender' in st.session_state.feature_cols and 'Gender' in le_dict:
+                # Safe transform handle unseen
+                try: input_data['Gender'] = le_dict['Gender'].transform([gender])[0]
+                except: input_data['Gender'] = 0
+            if 'Tenure' in st.session_state.feature_cols:
+                input_data['Tenure'] = tenure
+            if 'MonthlyCharges' in st.session_state.feature_cols:
+                input_data['MonthlyCharges'] = monthly_charges
+            if 'TotalCharges' in st.session_state.feature_cols:
+                input_data['TotalCharges'] = total_charges
+            if 'Contract' in st.session_state.feature_cols and 'Contract' in le_dict:
+                try: input_data['Contract'] = le_dict['Contract'].transform([contract])[0]
+                except: input_data['Contract'] = 0
+            if 'InternetService' in st.session_state.feature_cols and 'InternetService' in le_dict:
+                try: input_data['InternetService'] = le_dict['InternetService'].transform([internet_service])[0]
+                except: input_data['InternetService'] = 0
+                
+            input_df = pd.DataFrame([input_data])
+            input_scaled = st.session_state.scaler.transform(input_df)
+            
+            model = st.session_state.models[selected_predict_model]
+            prediction = model.predict(input_scaled)[0]
+            prob = model.predict_proba(input_scaled)[0]
+            
+            le_churn = st.session_state.label_encoders.get('Churn')
+            if le_churn:
+                pred_label = le_churn.inverse_transform([prediction])[0]
+            else:
+                pred_label = 'Yes' if prediction == 1 else 'No' # Fallback
+                
+            # Class 1 is usually churn (Yes)
+            # Find which index corresponds to 'Yes'
+            churn_index = 1
+            if le_churn:
+                try:
+                    churn_index = list(le_churn.classes_).index('Yes')
+                except:
+                    pass
+            
+            if pred_label == 'Yes' or pred_label == 1:
+                st.markdown(f'''
+                <div class="prediction-card-likely">
+                    Likely to Churn ⚠️<br>
+                    <span style="font-size: 1.2rem; color: #424242;">Churn Probability: {prob[churn_index]:.1%}</span>
+                </div>
+                ''', unsafe_allow_html=True)
+            else:
+                st.markdown(f'''
+                <div class="prediction-card-not-likely">
+                    Not Likely to Churn ✅<br>
+                    <span style="font-size: 1.2rem; color: #424242;">Churn Probability: {prob[churn_index]:.1%}</span>
+                </div>
+                ''', unsafe_allow_html=True)
+                
+        st.markdown("---")
+        st.markdown("### Batch Prediction")
+        st.write("Generate predictions for the entire uploaded dataset and download the results as a CSV file.")
+        
+        if st.button("Generate & Download Batch Predictions"):
+            with st.spinner("Processing batch predictions..."):
+                X = st.session_state.processed_data.drop('Churn', axis=1)
+                X_scaled = st.session_state.scaler.transform(X)
+                
+                model = st.session_state.models[selected_predict_model]
+                preds = model.predict(X_scaled)
+                
+                # Try getting the correct probabilities for Churn == 'Yes'
+                churn_index = 1
+                le_churn = st.session_state.label_encoders.get('Churn')
+                if le_churn:
+                    pred_labels = le_churn.inverse_transform(preds)
+                    try:
+                        churn_index = list(le_churn.classes_).index('Yes')
+                    except Exception:
+                        pass
+                else:
+                    pred_labels = ['Yes' if p == 1 else 'No' for p in preds]
+                    
+                probs = model.predict_proba(X_scaled)[:, churn_index]
+                
+                output_df = st.session_state.data.copy()
+                output_df['Predicted_Churn'] = pred_labels
+                output_df['Churn_Probability'] = probs
+                
+                csv = output_df.to_csv(index=False)
+                
+                st.download_button(
+                    label="⬇️ Download Predictions (CSV)",
+                    data=csv,
+                    file_name="churn_predictions_results.csv",
+                    mime="text/csv"
+                )
+    else:
+        st.warning("Please train the models first in the 'Model' tab.")
